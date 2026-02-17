@@ -13,8 +13,8 @@ class TestFeatureEngine:
     def test_warmup_period_is_26(self):
         assert FeatureEngine.WARMUP_PERIOD == 26
 
-    def test_obs_dim_is_18(self):
-        assert FeatureEngine.OBS_DIM == 18
+    def test_obs_dim_is_26(self):
+        assert FeatureEngine.OBS_DIM == 26
 
     def test_get_market_features_shape(self, synthetic_ohlcv):
         fe = FeatureEngine()
@@ -37,7 +37,7 @@ class TestFeatureEngine:
             step=30, position=1.0, unrealized_pnl_pct=0.05,
             cash_ratio=0.5, trade_duration=0.1,
         )
-        assert obs.shape == (18,)
+        assert obs.shape == (26,)
         assert obs.dtype == np.float32
 
     def test_build_observation_includes_agent_state(self, synthetic_ohlcv):
@@ -47,11 +47,11 @@ class TestFeatureEngine:
             step=30, position=1.0, unrealized_pnl_pct=0.05,
             cash_ratio=0.5, trade_duration=0.1,
         )
-        # Last 4 elements are agent state
-        assert obs[14] == pytest.approx(1.0)   # position
-        assert obs[15] == pytest.approx(0.05)  # unrealized_pnl_pct
-        assert obs[16] == pytest.approx(0.5)   # cash_ratio
-        assert obs[17] == pytest.approx(0.1)   # trade_duration
+        # Last 4 elements are agent state (indices 22, 23, 24, 25)
+        assert obs[22] == pytest.approx(1.0)   # position
+        assert obs[23] == pytest.approx(0.05)  # unrealized_pnl_pct
+        assert obs[24] == pytest.approx(0.5)   # cash_ratio
+        assert obs[25] == pytest.approx(0.1)   # trade_duration
 
     def test_rsi_in_zero_one_range(self, synthetic_ohlcv):
         fe = FeatureEngine()

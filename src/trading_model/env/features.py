@@ -5,19 +5,69 @@ from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 
 
+class DailyContextFeatureEngine:
+    """Computes features from daily OHLCV data to serve as context for the agent."""
+    CONTEXT_DIM = 8
+
+    def compute_context(self, daily_ohlcv: pd.DataFrame) -> np.ndarray:
+        """Compute technical indicators for the last day of the provided window.
+
+        Args:
+            daily_ohlcv: DataFrame with columns: datetime, open, high, low, close, volume.
+
+        Returns:
+            A 1D numpy array of indicators.
+        """
+        if len(daily_ohlcv) < 26: # Minimum for indicators like MACD
+            return np.zeros(self.CONTEXT_DIM, dtype=np.float32)
+
+        df = daily_ohlcv[["open", "high", "low", "close", "volume"]].copy()
+
+        # Last day's indicators
+        macd_ind = MACD(df["close"], window_slow=26, window_fast=12, window_sign=9)
+        macd = macd_ind.macd().iloc[-1]
+        macd_signal = macd_ind.macd_signal().iloc[-1]
+        
+        rsi_ind = RSIIndicator(df["close"], window=14)
+        rsi = rsi_ind.rsi().iloc[-1] / 100.0
+
+        bb_ind = BollingerBands(df["close"], window=20)
+        close = df["close"].iloc[-1]
+        bb_upper_pct = (bb_ind.bollinger_hband().iloc[-1] - close) / close
+        bb_lower_pct = (bb_ind.bollinger_lband().iloc[-1] - close) / close
+        bb_width = bb_ind.bollinger_wband().iloc[-1]
+
+        # Daily performance
+        prev_close = df["close"].iloc[-2]
+        daily_return = (close - prev_close) / prev_close
+        
+        # Log volume trend
+        avg_vol = df["volume"].iloc[-20:].mean()
+        vol_ratio = df["volume"].iloc[-1] / avg_vol if avg_vol > 0 else 1.0
+
+        context = np.array([
+            macd, macd_signal, rsi, bb_upper_pct, bb_lower_pct, bb_width, 
+            daily_return, np.log1p(vol_ratio)
+        ], dtype=np.float32)
+        
+        return np.nan_to_num(context)
+
+
 class FeatureEngine:
     WARMUP_PERIOD = 26
-    OBS_DIM = 18
+    OBS_DIM = 18 + DailyContextFeatureEngine.CONTEXT_DIM
 
     def __init__(self):
         self._features: pd.DataFrame | None = None
+        self._context: np.ndarray | None = None
 
-    def precompute(self, ohlcv: pd.DataFrame) -> None:
+    def precompute(self, ohlcv: pd.DataFrame, context: np.ndarray | None = None) -> None:
         """Precompute all technical indicators for a day's OHLCV data.
 
         Args:
             ohlcv: DataFrame with columns: open, high, low, close, volume.
                    Rows are minute bars in chronological order.
+            context: Optional daily context vector.
         """
         df = ohlcv[["open", "high", "low", "close", "volume"]].copy()
         n = len(df)
@@ -55,6 +105,7 @@ class FeatureEngine:
         df = df.fillna(0.0)
 
         self._features = df
+        self._context = context if context is not None else np.zeros(DailyContextFeatureEngine.CONTEXT_DIM, dtype=np.float32)
 
     @property
     def num_steps(self) -> int:
@@ -96,10 +147,10 @@ class FeatureEngine:
         cash_ratio: float,
         trade_duration: float,
     ) -> np.ndarray:
-        """Build the full 18-dim observation vector."""
+        """Build the full observation vector including daily context."""
         market = self.get_market_features(step)
         agent_state = np.array(
             [position, unrealized_pnl_pct, cash_ratio, trade_duration],
             dtype=np.float32,
         )
-        return np.concatenate([market, agent_state])
+        return np.concatenate([market, self._context, agent_state])

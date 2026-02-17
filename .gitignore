@@ -1,0 +1,15 @@
+.worktrees/
+artifacts/
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+.pytest_cache/
+uv.lock
+.idea/
+*.zip
+*.pkl
+*.npz
+tensorboard_logs/
+logs/

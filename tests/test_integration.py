@@ -8,8 +8,8 @@ from trading_model.env import FeatureEngine
 class TestIntegrationFullEpisode:
     def test_random_agent_completes_episode(self, synthetic_ohlcv):
         """A random agent should complete a full episode without errors."""
-        env = TradingEnv(data_days=[synthetic_ohlcv], shuffle=False)
-        obs, _ = env.reset(seed=42)
+        env = TradingEnv()
+        obs, _ = env.reset(seed=42, options={"intraday_data": synthetic_ohlcv})
 
         total_reward = 0.0
         steps = 0
@@ -28,7 +28,7 @@ class TestIntegrationFullEpisode:
         assert info["portfolio_value"] > 0  # shouldn't go bankrupt in 1 day
 
     def test_multi_day_episode_cycling(self, synthetic_ohlcv):
-        """Env should cycle through multiple days."""
+        """Env should work with multiple days by providing different data in reset."""
         # Create 3 slightly different days
         days = []
         for i in range(3):
@@ -36,10 +36,10 @@ class TestIntegrationFullEpisode:
             day["close"] = day["close"] * (1 + i * 0.01)
             days.append(day)
 
-        env = TradingEnv(data_days=days, shuffle=False)
+        env = TradingEnv()
 
         for episode in range(3):
-            obs, _ = env.reset(seed=42)
+            obs, _ = env.reset(seed=42, options={"intraday_data": days[episode]})
             terminated = False
             while not terminated:
                 _, _, terminated, _, _ = env.step(0)
@@ -53,8 +53,8 @@ class TestIntegrationFullEpisode:
         for col in ["open", "high", "low", "close"]:
             trending[col] = trending[col] * trend
 
-        env = TradingEnv(data_days=[trending], shuffle=False, fee_rate=0.0001)
-        env.reset(seed=42)
+        env = TradingEnv(fee_rate=0.0001)
+        env.reset(seed=42, options={"intraday_data": trending})
 
         # Buy 100% on first step
         env.step(3)

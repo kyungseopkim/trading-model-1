@@ -8,12 +8,20 @@ from trading_model.env.trading_env import TradingEnv
 @pytest.fixture
 def env(synthetic_ohlcv):
     """Create an env with 1 day of synthetic data."""
-    return TradingEnv(data_days=[synthetic_ohlcv], initial_cash=100_000.0, shuffle=False)
+    env = TradingEnv(initial_cash=100_000.0)
+    # Patch reset for tests that call reset() without arguments
+    original_reset = env.reset
+    def patched_reset(seed=None, options=None):
+        if options is None:
+            options = {"intraday_data": synthetic_ohlcv}
+        return original_reset(seed=seed, options=options)
+    env.reset = patched_reset
+    return env
 
 
 class TestTradingEnvSpaces:
     def test_observation_space_shape(self, env):
-        assert env.observation_space.shape == (18,)
+        assert env.observation_space.shape == (26,)
 
     def test_action_space_size(self, env):
         assert env.action_space.n == 7
@@ -22,7 +30,7 @@ class TestTradingEnvSpaces:
 class TestTradingEnvReset:
     def test_reset_returns_observation_and_info(self, env):
         obs, info = env.reset(seed=42)
-        assert obs.shape == (18,)
+        assert obs.shape == (26,)
         assert isinstance(info, dict)
 
     def test_reset_observation_no_nans(self, env):
@@ -31,18 +39,18 @@ class TestTradingEnvReset:
 
     def test_reset_agent_state_initial(self, env):
         obs, _ = env.reset(seed=42)
-        # Agent state is last 4: position=0, pnl=0, cash_ratio=1, duration=0
-        assert obs[14] == pytest.approx(0.0)   # no position
-        assert obs[15] == pytest.approx(0.0)   # no unrealized pnl
-        assert obs[16] == pytest.approx(1.0)   # all cash
-        assert obs[17] == pytest.approx(0.0)   # no trade duration
+        # Agent state is last 4 (22, 23, 24, 25): position=0, pnl=0, cash_ratio=1, duration=0
+        assert obs[22] == pytest.approx(0.0)   # no position
+        assert obs[23] == pytest.approx(0.0)   # no unrealized pnl
+        assert obs[24] == pytest.approx(1.0)   # all cash
+        assert obs[25] == pytest.approx(0.0)   # no trade duration
 
 
 class TestTradingEnvStep:
     def test_hold_does_not_change_portfolio(self, env):
         env.reset(seed=42)
         obs, reward, terminated, truncated, info = env.step(0)  # HOLD
-        assert obs.shape == (18,)
+        assert obs.shape == (26,)
         assert not terminated
         assert not truncated
 
@@ -50,13 +58,13 @@ class TestTradingEnvStep:
         env.reset(seed=42)
         # Buy 100%
         obs, reward, terminated, truncated, info = env.step(3)
-        assert obs[14] == pytest.approx(1.0)  # has position
-        assert obs[16] < 0.01  # almost no cash left (just rounding)
+        assert obs[22] == pytest.approx(1.0)  # has position
+        assert obs[24] < 0.01  # almost no cash left (just rounding)
 
         # Sell 100%
         obs, reward, terminated, truncated, info = env.step(6)
-        assert obs[14] == pytest.approx(0.0)  # no position
-        assert obs[16] == pytest.approx(1.0)  # all cash
+        assert obs[22] == pytest.approx(0.0)  # no position
+        assert obs[24] == pytest.approx(1.0)  # all cash
 
     def test_episode_terminates_at_end_of_day(self, env):
         env.reset(seed=42)
@@ -83,15 +91,17 @@ class TestTradingEnvStep:
         env.reset(seed=42)
         _, _, _, _, info = env.step(0)
         assert "portfolio_value" in info
+        # Allow for fee on first buy if tested, but here it's HOLD. 
+        # Actually fee might apply if we bought, but it's hold.
         assert info["portfolio_value"] == pytest.approx(100_000.0, rel=0.01)
 
 
 class TestTradingEnvGymCompliance:
     def test_check_env(self, synthetic_ohlcv):
         """Verify the env passes Gymnasium's built-in validation."""
-        env = TradingEnv(data_days=[synthetic_ohlcv], shuffle=False)
+        env = TradingEnv()
         # Just check reset/step cycle works without error
-        obs, info = env.reset(seed=0)
+        obs, info = env.reset(seed=0, options={"intraday_data": synthetic_ohlcv})
         assert env.observation_space.contains(obs)
         obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
         assert env.observation_space.contains(obs)
