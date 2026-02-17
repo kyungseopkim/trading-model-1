@@ -1,0 +1,97 @@
+import gymnasium as gym
+import numpy as np
+import pytest
+
+from trading_model.env.trading_env import TradingEnv
+
+
+@pytest.fixture
+def env(synthetic_ohlcv):
+    """Create an env with 1 day of synthetic data."""
+    return TradingEnv(data_days=[synthetic_ohlcv], initial_cash=100_000.0, shuffle=False)
+
+
+class TestTradingEnvSpaces:
+    def test_observation_space_shape(self, env):
+        assert env.observation_space.shape == (18,)
+
+    def test_action_space_size(self, env):
+        assert env.action_space.n == 7
+
+
+class TestTradingEnvReset:
+    def test_reset_returns_observation_and_info(self, env):
+        obs, info = env.reset(seed=42)
+        assert obs.shape == (18,)
+        assert isinstance(info, dict)
+
+    def test_reset_observation_no_nans(self, env):
+        obs, _ = env.reset(seed=42)
+        assert not np.any(np.isnan(obs))
+
+    def test_reset_agent_state_initial(self, env):
+        obs, _ = env.reset(seed=42)
+        # Agent state is last 4: position=0, pnl=0, cash_ratio=1, duration=0
+        assert obs[14] == pytest.approx(0.0)   # no position
+        assert obs[15] == pytest.approx(0.0)   # no unrealized pnl
+        assert obs[16] == pytest.approx(1.0)   # all cash
+        assert obs[17] == pytest.approx(0.0)   # no trade duration
+
+
+class TestTradingEnvStep:
+    def test_hold_does_not_change_portfolio(self, env):
+        env.reset(seed=42)
+        obs, reward, terminated, truncated, info = env.step(0)  # HOLD
+        assert obs.shape == (18,)
+        assert not terminated
+        assert not truncated
+
+    def test_buy_then_sell_full_episode(self, env):
+        env.reset(seed=42)
+        # Buy 100%
+        obs, reward, terminated, truncated, info = env.step(3)
+        assert obs[14] == pytest.approx(1.0)  # has position
+        assert obs[16] < 0.01  # almost no cash left (just rounding)
+
+        # Sell 100%
+        obs, reward, terminated, truncated, info = env.step(6)
+        assert obs[14] == pytest.approx(0.0)  # no position
+        assert obs[16] == pytest.approx(1.0)  # all cash
+
+    def test_episode_terminates_at_end_of_day(self, env):
+        env.reset(seed=42)
+        terminated = False
+        steps = 0
+        while not terminated:
+            _, _, terminated, _, _ = env.step(0)
+            steps += 1
+        # Should run for num_bars - warmup_period steps
+        assert steps == 400 - 26
+
+    def test_force_liquidation_at_episode_end(self, env):
+        env.reset(seed=42)
+        # Buy on first step
+        env.step(3)
+        # Hold until end
+        terminated = False
+        while not terminated:
+            _, _, terminated, _, info = env.step(0)
+        # Portfolio value should reflect liquidation
+        assert "portfolio_value" in info
+
+    def test_portfolio_value_in_info(self, env):
+        env.reset(seed=42)
+        _, _, _, _, info = env.step(0)
+        assert "portfolio_value" in info
+        assert info["portfolio_value"] == pytest.approx(100_000.0, rel=0.01)
+
+
+class TestTradingEnvGymCompliance:
+    def test_check_env(self, synthetic_ohlcv):
+        """Verify the env passes Gymnasium's built-in validation."""
+        env = TradingEnv(data_days=[synthetic_ohlcv], shuffle=False)
+        # Just check reset/step cycle works without error
+        obs, info = env.reset(seed=0)
+        assert env.observation_space.contains(obs)
+        obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+        assert env.observation_space.contains(obs)
