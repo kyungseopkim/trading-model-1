@@ -60,14 +60,16 @@ class FeatureEngine:
     def __init__(self):
         self._features: pd.DataFrame | None = None
         self._context: np.ndarray | None = None
+        self._daily_window: pd.DataFrame | None = None
+        self._context_engine = DailyContextFeatureEngine()
 
-    def precompute(self, ohlcv: pd.DataFrame, context: np.ndarray | None = None) -> None:
+    def precompute(self, ohlcv: pd.DataFrame, daily_window: pd.DataFrame | None = None) -> None:
         """Precompute all technical indicators for a day's OHLCV data.
 
         Args:
             ohlcv: DataFrame with columns: open, high, low, close, volume.
                    Rows are minute bars in chronological order.
-            context: Optional daily context vector.
+            daily_window: Optional daily OHLCV DataFrame for rolling context recomputation.
         """
         df = ohlcv[["open", "high", "low", "close", "volume"]].copy()
         n = len(df)
@@ -105,7 +107,34 @@ class FeatureEngine:
         df = df.fillna(0.0)
 
         self._features = df
-        self._context = context if context is not None else np.zeros(DailyContextFeatureEngine.CONTEXT_DIM, dtype=np.float32)
+        self._daily_window = daily_window
+        if daily_window is not None:
+            self._context = self._context_engine.compute_context(daily_window)
+        else:
+            self._context = np.zeros(DailyContextFeatureEngine.CONTEXT_DIM, dtype=np.float32)
+
+    def _build_synthetic_bar(self, step: int) -> dict:
+        """Build a synthetic daily bar from intraday bars [0..step]."""
+        bars = self._features.iloc[: step + 1]
+        return {
+            "open": bars.iloc[0]["open"],
+            "high": bars["high"].max(),
+            "low": bars["low"].min(),
+            "close": bars.iloc[step]["close"],
+            "volume": bars["volume"].sum(),
+        }
+
+    def update_context(self, step: int) -> None:
+        """Recompute daily context by appending a synthetic bar for today's intraday data."""
+        if self._daily_window is None:
+            return
+
+        synthetic = self._build_synthetic_bar(step)
+        appended = pd.concat(
+            [self._daily_window, pd.DataFrame([synthetic])],
+            ignore_index=True,
+        )
+        self._context = self._context_engine.compute_context(appended)
 
     @property
     def num_steps(self) -> int:
