@@ -50,9 +50,9 @@ class TradingEnv(gym.Env):
         self._trade_start_step = 0
 
     def reset(self, seed=None, options=None):
-        """Reset with specific intraday data and daily context.
-        
-        Options should contain 'intraday_data' and 'daily_context'.
+        """Reset with specific intraday data and optional daily window.
+
+        Options should contain 'intraday_data' and optionally 'daily_window'.
         """
         super().reset(seed=seed)
 
@@ -60,9 +60,9 @@ class TradingEnv(gym.Env):
             raise ValueError("TradingEnv.reset() requires 'intraday_data' in options.")
 
         self._intraday_data = options["intraday_data"]
-        daily_context = options.get("daily_context")
+        daily_window = options.get("daily_window")
 
-        self.feature_engine.precompute(self._intraday_data, context=daily_context)
+        self.feature_engine.precompute(self._intraday_data, daily_window=daily_window)
         self._step = FeatureEngine.WARMUP_PERIOD
         self._cash = self.initial_cash
         self._shares = 0.0
@@ -108,6 +108,7 @@ class TradingEnv(gym.Env):
         reward = self.reward_calc.calculate(portfolio_value, step_return)
 
         self._step += 1
+        self.feature_engine.update_context(self._step - 1)
         terminated = self._step >= self.feature_engine.num_steps
 
         # Force liquidate at end of day
