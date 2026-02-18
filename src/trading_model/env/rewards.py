@@ -4,7 +4,9 @@ import numpy as np
 
 
 class RewardCalculator:
-    def __init__(self, alpha: float = 0.6, beta: float = 0.5, window: int = 60):
+    RETURN_SCALE = 100.0  # scale step_return to match Sharpe component magnitude
+
+    def __init__(self, alpha: float = 0.6, beta: float = 0.2, window: int = 60):
         self.alpha = alpha
         self.beta = beta
         self.window = window
@@ -20,7 +22,7 @@ class RewardCalculator:
     def calculate(self, portfolio_value: float, step_return: float) -> float:
         """Compute Sharpe-hybrid reward with drawdown penalty.
 
-        R_t = alpha * r_t + (1 - alpha) * (mu / sigma) - beta * max(0, DD_t - DD_{t-1})
+        R_t = alpha * (r_t * SCALE) + (1 - alpha) * clamp(mu / sigma) - beta * max(0, DD_t - DD_{t-1})
         """
         self._returns.append(step_return)
 
@@ -30,7 +32,7 @@ class RewardCalculator:
         dd_increase = max(0.0, current_dd - self._prev_drawdown)
         self._prev_drawdown = current_dd
 
-        # Risk-adjusted component (rolling Sharpe)
+        # Risk-adjusted component (rolling Sharpe), clamped to [-1, 1]
         if len(self._returns) < 2:
             risk_adjusted = 0.0
         else:
@@ -38,5 +40,7 @@ class RewardCalculator:
             mu = arr.mean()
             sigma = arr.std()
             risk_adjusted = mu / sigma if sigma > 1e-8 else 0.0
+            risk_adjusted = float(np.clip(risk_adjusted, -1.0, 1.0))
 
-        return self.alpha * step_return + (1 - self.alpha) * risk_adjusted - self.beta * dd_increase
+        scaled_return = step_return * self.RETURN_SCALE
+        return self.alpha * scaled_return + (1 - self.alpha) * risk_adjusted - self.beta * dd_increase

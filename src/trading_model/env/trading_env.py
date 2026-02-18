@@ -22,7 +22,7 @@ class TradingEnv(gym.Env):
         initial_cash: float = 100_000.0,
         fee_rate: float = 0.001,
         reward_alpha: float = 0.6,
-        reward_beta: float = 0.5,
+        reward_beta: float = 0.2,
         reward_window: int = 60,
     ):
         super().__init__()

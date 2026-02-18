@@ -1,3 +1,5 @@
+import json
+import os
 import click
 import pandas as pd
 import numpy as np
@@ -8,6 +10,13 @@ from sb3_contrib import RecurrentPPO
 
 from trading_model import TradingEnv
 from trading_model.data.loader import load_daily_window, get_trading_days, load_specific_day, load_from_db, load_days_from_dataframe
+
+
+def linear_schedule(initial_value: float):
+    """Return a callable that linearly decays from initial_value to 0."""
+    def schedule(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return schedule
 
 
 def generate_synthetic_data(num_days=10, bars_per_day=400):
@@ -51,35 +60,61 @@ def prepare_data(ticker, num_days, data_type="historical"):
     return train_days, eval_days
 
 
-def make_vec_envs(initial_cash, fee_rate):
-    """Create normalized vectorized environment."""
+def make_vec_envs(initial_cash, fee_rate, n_envs=4):
+    """Create normalized vectorized environment with parallel sub-environments."""
     def make_single_env():
         return Monitor(TradingEnv(initial_cash=initial_cash, fee_rate=fee_rate))
-    train_env = DummyVecEnv([make_single_env])
+    train_env = DummyVecEnv([make_single_env for _ in range(n_envs)])
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.)
     return train_env
 
 
 def patch_env(vec_env, options):
-    """Patch the reset method of the underlying environment to use specific options."""
-    env = vec_env.envs[0].unwrapped
-    if not hasattr(env, "_original_reset"):
-        env._original_reset = env.reset
-    def patched_reset(seed=None, options_internal=None):
-        return env._original_reset(seed=seed, options=options)
-    env.reset = patched_reset
+    """Patch the reset method of all underlying environments to use specific options."""
+    for env_wrapper in vec_env.envs:
+        env = env_wrapper.unwrapped
+        if not hasattr(env, "_original_reset"):
+            env._original_reset = env.reset
+        def patched_reset(seed=None, options_internal=None, _opts=options, _env=env):
+            return _env._original_reset(seed=seed, options=_opts)
+        env.reset = patched_reset
+
+
+def _run_eval_episode(model, vec_env, initial_cash):
+    """Run a single eval episode and return raw PnL metrics.
+
+    Returns dict with portfolio_value, pnl_pct, and num_trades.
+    """
+    obs = vec_env.reset()
+    terminated = False
+    num_trades = 0
+    prev_action = 0
+    while not np.all(terminated):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, info = vec_env.step(action)
+        act = int(action[0])
+        if act != 0 and act != prev_action:
+            num_trades += 1
+        prev_action = act
+    # info from VecEnv is a list of dicts; take first env
+    final_info = info[0] if isinstance(info, list) else info
+    portfolio_value = final_info.get("portfolio_value", initial_cash)
+    pnl_pct = (portfolio_value - initial_cash) / initial_cash * 100
+    return {"portfolio_value": portfolio_value, "pnl_pct": pnl_pct, "num_trades": num_trades}
 
 
 def walkthrough_train(
     ticker="NVDA",
     start_date="2024-03-01",
     end_date="2024-03-31",
-    total_timesteps_per_day=5000,
+    total_timesteps_per_day=20_000,
     initial_cash=100000.0,
     fee_rate=0.001,
     learning_rate=2e-4,
     n_steps=512,
     batch_size=64,
+    model_path="trading_ppo_walkthrough",
+    vec_normalize_path="vec_normalize_walkthrough.pkl",
 ):
     trading_days = get_trading_days(ticker, start_date, end_date)
     if len(trading_days) < 2:
@@ -88,9 +123,12 @@ def walkthrough_train(
 
     train_env = make_vec_envs(initial_cash, fee_rate)
     model = RecurrentPPO(
-        "MlpLstmPolicy", train_env, learning_rate=learning_rate, n_steps=n_steps,
-        batch_size=batch_size, verbose=0, tensorboard_log="./tensorboard_logs/"
+        "MlpLstmPolicy", train_env, learning_rate=linear_schedule(learning_rate),
+        n_steps=n_steps, batch_size=batch_size, verbose=0,
+        tensorboard_log="./tensorboard_logs/"
     )
+
+    win_days, loss_days = 0, 0
     for i in range(len(trading_days) - 1):
         train_day, eval_day = trading_days[i], trading_days[i+1]
         print(f"[{i+1}/{len(trading_days)-1}] Training: {train_day.date()}, Eval: {eval_day.date()}")
@@ -107,48 +145,74 @@ def walkthrough_train(
         if not intraday_eval.empty:
             daily_window_eval = load_daily_window(ticker, eval_day)
             patch_env(train_env, {"intraday_data": intraday_eval, "daily_window": daily_window_eval})
-            obs = train_env.reset()
-            total_reward, terminated = 0, False
-            while not terminated:
-                action, _ = model.predict(obs, deterministic=True)
-                obs, reward, terminated, info = train_env.step(action)
-                total_reward += reward[0]
-            print(f"Eval Reward: {total_reward:.4f}")
 
-    model.save("trading_ppo_walkthrough")
-    train_env.save("vec_normalize_walkthrough.pkl")
+            # Disable VecNormalize training/reward normalization during eval
+            train_env.training = False
+            train_env.norm_reward = False
+
+            result = _run_eval_episode(model, train_env, initial_cash)
+
+            # Restore training mode
+            train_env.training = True
+            train_env.norm_reward = True
+
+            pnl = result["pnl_pct"]
+            if pnl >= 0:
+                win_days += 1
+            else:
+                loss_days += 1
+            print(f"  Eval PnL: {pnl:+.4f}%  |  Trades: {result['num_trades']}  |  Portfolio: ${result['portfolio_value']:,.2f}")
+
+    print(f"\nWalkthrough Summary: {win_days} win / {loss_days} loss days")
+    os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
+    model.save(model_path)
+    train_env.save(vec_normalize_path)
 
 
-def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1):
+def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_file="tuned_params.json"):
+    if os.path.exists(params_file):
+        print(f"Skipping tune: {params_file} already exists.")
+        return
     train_days, eval_days = prepare_data(ticker, 20)
     def objective(trial):
         lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
         ns = trial.suggest_categorical("n_steps", [512, 1024, 2048])
         bs = trial.suggest_categorical("batch_size", [32, 64, 128])
-        
-        train_env = make_vec_envs(100000.0, 0.001)
-        env = train_env.envs[0].unwrapped
-        original_reset = env.reset
-        def tune_reset(seed=None, options=None):
-            return original_reset(seed=seed, options={"intraday_data": train_days[np.random.randint(len(train_days))]})
-        env.reset = tune_reset
+        gamma = trial.suggest_float("gamma", 0.95, 0.999)
+        ent_coef = trial.suggest_float("ent_coef", 1e-4, 0.1, log=True)
+        gae_lambda = trial.suggest_float("gae_lambda", 0.9, 0.99)
+        n_epochs = trial.suggest_categorical("n_epochs", [3, 5, 10])
+        clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2, 0.3])
+        max_grad_norm = trial.suggest_categorical("max_grad_norm", [0.3, 0.5, 1.0])
 
-        model = RecurrentPPO("MlpLstmPolicy", train_env, learning_rate=lr, n_steps=ns, batch_size=bs, verbose=0)
+        train_env = make_vec_envs(100000.0, 0.001)
+        for env_wrapper in train_env.envs:
+            env = env_wrapper.unwrapped
+            original_reset = env.reset
+            def tune_reset(seed=None, options=None, _orig=original_reset):
+                return _orig(seed=seed, options={"intraday_data": train_days[np.random.randint(len(train_days))]})
+            env.reset = tune_reset
+
+        model = RecurrentPPO(
+            "MlpLstmPolicy", train_env,
+            learning_rate=linear_schedule(lr), n_steps=ns, batch_size=bs,
+            gamma=gamma, ent_coef=ent_coef, gae_lambda=gae_lambda,
+            n_epochs=n_epochs, clip_range=clip_range, max_grad_norm=max_grad_norm,
+            verbose=0,
+        )
         model.learn(total_timesteps=total_timesteps)
-        
-        # Evaluation on multiple random days for better signal
-        eval_rewards = []
+
+        # Disable normalization for eval
+        train_env.training = False
+        train_env.norm_reward = False
+
+        eval_pnls = []
         for _ in range(min(3, len(eval_days))):
             eval_day = eval_days[np.random.randint(len(eval_days))]
             patch_env(train_env, {"intraday_data": eval_day})
-            obs = train_env.reset()
-            rew, term = 0, False
-            while not term:
-                action, _ = model.predict(obs, deterministic=True)
-                obs, r, term, info = train_env.step(action)
-                rew += r[0]
-            eval_rewards.append(rew)
-        return np.mean(eval_rewards)
+            result = _run_eval_episode(model, train_env, 100000.0)
+            eval_pnls.append(result["pnl_pct"])
+        return np.mean(eval_pnls)
 
     study = optuna.create_study(direction="maximize")
     print("Starting optimization... (Press Ctrl+C to stop)")
@@ -156,12 +220,68 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1):
         study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
     except KeyboardInterrupt:
         print("\nOptimization interrupted by user.")
-    
+
     if len(study.trials) > 0:
         print(f"Best params: {study.best_params}")
         print(f"Best value: {study.best_value}")
+        with open(params_file, "w") as f:
+            json.dump(study.best_params, f, indent=2)
+        print(f"Saved best params to {params_file}")
     else:
         print("No trials completed.")
+
+
+def evaluate(
+    ticker="NVDA",
+    start_date="2024-04-01",
+    end_date="2024-04-30",
+    model_path="trading_ppo_walkthrough.zip",
+    vec_normalize_path="vec_normalize_walkthrough.pkl",
+    initial_cash=100000.0,
+    fee_rate=0.001,
+):
+    trading_days = get_trading_days(ticker, start_date, end_date)
+    if not trading_days:
+        print("No trading days found in the given range.")
+        return
+
+    train_env = make_vec_envs(initial_cash, fee_rate)
+    train_env = VecNormalize.load(vec_normalize_path, train_env.venv)
+    train_env.training = False
+    train_env.norm_reward = False
+
+    model = RecurrentPPO.load(model_path, env=train_env)
+
+    results = []
+    for day in trading_days:
+        intraday = load_specific_day(ticker, day)
+        if intraday.empty:
+            continue
+        daily_window = load_daily_window(ticker, day)
+        patch_env(train_env, {"intraday_data": intraday, "daily_window": daily_window})
+        result = _run_eval_episode(model, train_env, initial_cash)
+        results.append({"date": day.date(), **result})
+        print(f"  {day.date()}: PnL={result['pnl_pct']:+.4f}%  Trades={result['num_trades']}  Portfolio=${result['portfolio_value']:,.2f}")
+
+    if results:
+        pnls = [r["pnl_pct"] for r in results]
+        win = sum(1 for p in pnls if p >= 0)
+        loss = len(pnls) - win
+        print(f"\nEvaluation Summary ({len(results)} days)")
+        print(f"  Mean PnL%:    {np.mean(pnls):+.4f}%")
+        print(f"  Std PnL%:     {np.std(pnls):.4f}%")
+        print(f"  Min PnL%:     {np.min(pnls):+.4f}%")
+        print(f"  Max PnL%:     {np.max(pnls):+.4f}%")
+        print(f"  Win/Loss:     {win}/{loss}")
+        print(f"  Avg Trades:   {np.mean([r['num_trades'] for r in results]):.1f}")
+
+
+def load_params_file(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+WALKTHROUGH_PARAM_KEYS = {"learning_rate", "n_steps", "batch_size"}
 
 
 @click.group()
@@ -169,17 +289,40 @@ def cli(): pass
 
 @cli.command()
 @click.option("--ticker", type=str, default="NVDA")
-@click.option("--start_date", type=str, default="2024-03-01")
-@click.option("--end_date", type=str, default="2024-03-31")
-@click.option("--timesteps_per_day", type=int, default=5000)
-def walkthrough(ticker, start_date, end_date, timesteps_per_day):
-    walkthrough_train(ticker=ticker, start_date=start_date, end_date=end_date, total_timesteps_per_day=timesteps_per_day)
+@click.option("--start-date", type=str, default="2024-03-01")
+@click.option("--end-date", type=str, default="2024-03-31")
+@click.option("--timesteps-per-day", type=int, default=20_000)
+@click.option("--params-file", type=str, default=None, help="JSON file with tuned hyperparameters.")
+@click.option("--model-path", type=str, default="trading_ppo_walkthrough")
+@click.option("--vec-normalize-path", type=str, default="vec_normalize_walkthrough.pkl")
+def walkthrough(ticker, start_date, end_date, timesteps_per_day, params_file, model_path, vec_normalize_path):
+    kwargs = {}
+    if params_file:
+        params = load_params_file(params_file)
+        kwargs.update({k: v for k, v in params.items() if k in WALKTHROUGH_PARAM_KEYS})
+    walkthrough_train(
+        ticker=ticker, start_date=start_date, end_date=end_date,
+        total_timesteps_per_day=timesteps_per_day,
+        model_path=model_path, vec_normalize_path=vec_normalize_path,
+        **kwargs,
+    )
 
 @cli.command()
 @click.option("--ticker", type=str, default="NVDA")
 @click.option("--n-trials", type=int, default=20)
 @click.option("--n-jobs", type=int, default=1, help="Number of parallel jobs for Optuna tuning.")
-def tune_cmd(**kwargs):
-    tune(**kwargs)
+@click.option("--params-file", type=str, default="tuned_params.json", help="Output file for best params.")
+def tune_cmd(params_file, **kwargs):
+    tune(params_file=params_file, **kwargs)
+
+@cli.command()
+@click.option("--ticker", type=str, default="NVDA")
+@click.option("--start-date", type=str, default="2024-04-01")
+@click.option("--end-date", type=str, default="2024-04-30")
+@click.option("--model-path", type=str, default="trading_ppo_walkthrough.zip")
+@click.option("--vec-normalize-path", type=str, default="vec_normalize_walkthrough.pkl")
+def evaluate_cmd(ticker, start_date, end_date, model_path, vec_normalize_path):
+    evaluate(ticker=ticker, start_date=start_date, end_date=end_date,
+             model_path=model_path, vec_normalize_path=vec_normalize_path)
 
 if __name__ == "__main__": cli()

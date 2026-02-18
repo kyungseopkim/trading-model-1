@@ -1,5 +1,5 @@
 [project]
-name = "trading-model"
+name = "trading-model-1"
 version = "0.1.0"
 description = "RL intraday trading environment"
 readme = "README.md"
