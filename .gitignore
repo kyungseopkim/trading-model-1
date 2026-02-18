@@ -1,15 +1,47 @@
+# Core Workflows & Local Overrides
 .worktrees/
-artifacts/
+.claude/
+.gemini/
+.python-version
+.env
+secrets.*
+*.local.json
+
+# Build and Packaging
+build/
+dist/
+*.egg-info/
+node_modules/
+
+# Python Ecosystem
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
-*.egg-info/
-dist/
+.tox/
+.nox/
+.coverage
+.cache
+.mypy_cache/
 .pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 uv.lock
-.idea/
+
+# Artifacts & Data
+artifacts/
+models/
+tensorboard_logs/
+logs/
 *.zip
 *.pkl
 *.npz
-tensorboard_logs/
-logs/
+*.db
+*.sqlite
+
+# IDEs & System
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
