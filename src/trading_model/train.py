@@ -10,7 +10,6 @@ from sb3_contrib import RecurrentPPO
 
 from trading_model import TradingEnv
 from trading_model.data.loader import load_daily_window, get_trading_days, load_specific_day, load_from_db, load_days_from_dataframe
-from trading_model.env.features import DailyContextFeatureEngine
 
 
 def generate_synthetic_data(num_days=10, bars_per_day=400):
@@ -135,26 +134,22 @@ def walkthrough_train(
         "MlpLstmPolicy", train_env, learning_rate=learning_rate, n_steps=n_steps,
         batch_size=batch_size, verbose=0, tensorboard_log="./tensorboard_logs/"
     )
-    context_engine = DailyContextFeatureEngine()
-
     for i in range(len(trading_days) - 1):
         train_day, eval_day = trading_days[i], trading_days[i+1]
         print(f"[{i+1}/{len(trading_days)-1}] Training: {train_day.date()}, Eval: {eval_day.date()}")
-        
+
         daily_window = load_daily_window(ticker, train_day)
-        daily_context = context_engine.compute_context(daily_window)
         intraday_train = load_specific_day(ticker, train_day)
-        
+
         if intraday_train.empty: continue
-        
-        patch_env(train_env, {"intraday_data": intraday_train, "daily_context": daily_context})
+
+        patch_env(train_env, {"intraday_data": intraday_train, "daily_window": daily_window})
         model.learn(total_timesteps=total_timesteps_per_day, reset_num_timesteps=False)
-        
+
         intraday_eval = load_specific_day(ticker, eval_day)
         if not intraday_eval.empty:
             daily_window_eval = load_daily_window(ticker, eval_day)
-            daily_context_eval = context_engine.compute_context(daily_window_eval)
-            patch_env(train_env, {"intraday_data": intraday_eval, "daily_context": daily_context_eval})
+            patch_env(train_env, {"intraday_data": intraday_eval, "daily_window": daily_window_eval})
             obs = train_env.reset()
             total_reward, terminated = 0, False
             while not terminated:
