@@ -23,3 +23,22 @@ def synthetic_ohlcv() -> pd.DataFrame:
     return pd.DataFrame(
         {"open": open_, "high": high, "low": low, "close": close, "volume": volume}
     )
+
+
+@pytest.fixture
+def synthetic_daily_window() -> pd.DataFrame:
+    """Generate 90 days of synthetic daily OHLCV data for daily context."""
+    np.random.seed(123)
+    n = 90
+    base = 95.0
+    returns = np.random.normal(0.001, 0.015, n)
+    close = base * np.exp(np.cumsum(returns))
+
+    high = close * (1 + np.abs(np.random.normal(0, 0.01, n)))
+    low = close * (1 - np.abs(np.random.normal(0, 0.01, n)))
+    open_ = low + (high - low) * np.random.uniform(0.3, 0.7, n)
+    volume = np.random.randint(100_000, 5_000_000, n).astype(float)
+
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "volume": volume}
+    )
