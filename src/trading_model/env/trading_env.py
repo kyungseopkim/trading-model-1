@@ -21,9 +21,7 @@ class TradingEnv(gym.Env):
         self,
         initial_cash: float = 100_000.0,
         fee_rate: float = 0.001,
-        reward_alpha: float = 0.6,
-        reward_beta: float = 0.2,
-        reward_window: int = 60,
+        reward_eta: float = 0.01,
     ):
         super().__init__()
 
@@ -31,9 +29,7 @@ class TradingEnv(gym.Env):
 
         self.feature_engine = FeatureEngine()
         self.action_mapper = ActionMapper()
-        self.reward_calc = RewardCalculator(
-            alpha=reward_alpha, beta=reward_beta, window=reward_window
-        )
+        self.reward_calc = RewardCalculator(eta=reward_eta)
         self.friction = FrictionModel(fee_rate=fee_rate)
 
         self.observation_space = spaces.Box(
@@ -94,30 +90,35 @@ class TradingEnv(gym.Env):
         self._shares += shares_delta
         self._cash += cash_delta
 
-        # Track trade timing
-        if shares_delta > 0 and self._shares == shares_delta:
-            self._entry_price = price
-            self._trade_start_step = self._step
+        # Track entry price with weighted average cost basis
+        if shares_delta > 0:
+            prev_shares = self._shares - shares_delta
+            if prev_shares <= 0:
+                self._entry_price = price
+                self._trade_start_step = self._step
+            else:
+                self._entry_price = (
+                    self._entry_price * prev_shares + price * shares_delta
+                ) / self._shares
         elif self._shares <= 0:
             self._shares = 0.0
             self._entry_price = 0.0
             self._trade_start_step = self._step
 
-        portfolio_value = self._cash + self._shares * price
-        step_return = (portfolio_value - prev_value) / prev_value if prev_value > 0 else 0.0
-        reward = self.reward_calc.calculate(portfolio_value, step_return)
-
         self._step += 1
         self.feature_engine.update_context(self._step - 1)
         terminated = self._step >= self.feature_engine.num_steps
 
-        # Force liquidate at end of day
+        # Force liquidate at end of day (before reward so cost is reflected)
         if terminated and self._shares > 0:
             liquidation_value = self._shares * price
             cost = self.friction.calculate_cost(liquidation_value)
             self._cash += liquidation_value - cost
             self._shares = 0.0
-            portfolio_value = self._cash
+
+        portfolio_value = self._cash + self._shares * price
+        step_return = (portfolio_value - prev_value) / prev_value if prev_value > 0 else 0.0
+        reward = self.reward_calc.calculate(portfolio_value, step_return)
 
         info = {"portfolio_value": portfolio_value}
         obs = np.zeros(FeatureEngine.OBS_DIM, dtype=np.float32) if terminated else self._get_obs()

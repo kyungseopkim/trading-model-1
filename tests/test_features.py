@@ -10,8 +10,8 @@ class TestFeatureEngine:
         fe.precompute(synthetic_ohlcv)
         assert fe.num_steps == 400
 
-    def test_warmup_period_is_26(self):
-        assert FeatureEngine.WARMUP_PERIOD == 26
+    def test_warmup_period_is_60(self):
+        assert FeatureEngine.WARMUP_PERIOD == 60
 
     def test_obs_dim_is_26(self):
         assert FeatureEngine.OBS_DIM == 26

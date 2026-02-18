@@ -12,10 +12,10 @@ from trading_model import TradingEnv
 from trading_model.data.loader import load_daily_window, get_trading_days, load_specific_day, load_from_db, load_days_from_dataframe
 
 
-def linear_schedule(initial_value: float):
-    """Return a callable that linearly decays from initial_value to 0."""
+def constant_schedule(value: float):
+    """Return a callable that always returns the same value."""
     def schedule(progress_remaining: float) -> float:
-        return progress_remaining * initial_value
+        return value
     return schedule
 
 
@@ -123,7 +123,7 @@ def walkthrough_train(
 
     train_env = make_vec_envs(initial_cash, fee_rate)
     model = RecurrentPPO(
-        "MlpLstmPolicy", train_env, learning_rate=linear_schedule(learning_rate),
+        "MlpLstmPolicy", train_env, learning_rate=constant_schedule(learning_rate),
         n_steps=n_steps, batch_size=batch_size, verbose=0,
         tensorboard_log="./tensorboard_logs/"
     )
@@ -195,7 +195,7 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_fil
 
         model = RecurrentPPO(
             "MlpLstmPolicy", train_env,
-            learning_rate=linear_schedule(lr), n_steps=ns, batch_size=bs,
+            learning_rate=constant_schedule(lr), n_steps=ns, batch_size=bs,
             gamma=gamma, ent_coef=ent_coef, gae_lambda=gae_lambda,
             n_epochs=n_epochs, clip_range=clip_range, max_grad_norm=max_grad_norm,
             verbose=0,

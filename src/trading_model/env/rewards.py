@@ -1,46 +1,42 @@
-from collections import deque
-
 import numpy as np
 
 
 class RewardCalculator:
-    RETURN_SCALE = 100.0  # scale step_return to match Sharpe component magnitude
+    """Differential Sharpe Ratio (DSR) reward.
 
-    def __init__(self, alpha: float = 0.6, beta: float = 0.2, window: int = 60):
-        self.alpha = alpha
-        self.beta = beta
-        self.window = window
-        self._returns: deque[float] = deque(maxlen=window)
-        self._peak_value = 0.0
-        self._prev_drawdown = 0.0
+    Based on Moody & Saffell (2001). Uses exponential moving averages
+    of returns to compute per-step risk-adjusted reward with proper
+    temporal credit assignment.
+    """
+
+    def __init__(self, eta: float = 0.01):
+        self.eta = eta
+        self._A = 0.0  # EMA of returns
+        self._B = 0.0  # EMA of squared returns
 
     def reset(self, initial_value: float) -> None:
-        self._returns.clear()
-        self._peak_value = initial_value
-        self._prev_drawdown = 0.0
+        self._A = 0.0
+        self._B = 0.0
 
     def calculate(self, portfolio_value: float, step_return: float) -> float:
-        """Compute Sharpe-hybrid reward with drawdown penalty.
+        """Compute DSR reward for a single step.
 
-        R_t = alpha * (r_t * SCALE) + (1 - alpha) * clamp(mu / sigma) - beta * max(0, DD_t - DD_{t-1})
+        DSR_t = (B_{t-1} * dA - 0.5 * A_{t-1} * dB) / (B_{t-1} - A_{t-1}^2)^{3/2}
         """
-        self._returns.append(step_return)
+        r = step_return
+        dA = r - self._A
+        dB = r * r - self._B
 
-        # Drawdown tracking
-        self._peak_value = max(self._peak_value, portfolio_value)
-        current_dd = (self._peak_value - portfolio_value) / self._peak_value
-        dd_increase = max(0.0, current_dd - self._prev_drawdown)
-        self._prev_drawdown = current_dd
-
-        # Risk-adjusted component (rolling Sharpe), clamped to [-1, 1]
-        if len(self._returns) < 2:
-            risk_adjusted = 0.0
+        variance = self._B - self._A * self._A
+        if variance > 1e-12:
+            dsr = (self._B * dA - 0.5 * self._A * dB) / (variance ** 1.5)
+            dsr = float(np.clip(dsr, -2.0, 2.0))
         else:
-            arr = np.array(self._returns)
-            mu = arr.mean()
-            sigma = arr.std()
-            risk_adjusted = mu / sigma if sigma > 1e-8 else 0.0
-            risk_adjusted = float(np.clip(risk_adjusted, -1.0, 1.0))
+            # Not enough history: fall back to scaled return
+            dsr = r * 100.0
 
-        scaled_return = step_return * self.RETURN_SCALE
-        return self.alpha * scaled_return + (1 - self.alpha) * risk_adjusted - self.beta * dd_increase
+        # Update EMAs
+        self._A += self.eta * dA
+        self._B += self.eta * dB
+
+        return dsr

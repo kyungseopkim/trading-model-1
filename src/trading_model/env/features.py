@@ -23,16 +23,16 @@ class DailyContextFeatureEngine:
 
         df = daily_ohlcv[["open", "high", "low", "close", "volume"]].copy()
 
-        # Last day's indicators
+        # Last day's indicators (daily scale — keep standard windows)
         macd_ind = MACD(df["close"], window_slow=26, window_fast=12, window_sign=9)
-        macd = macd_ind.macd().iloc[-1]
-        macd_signal = macd_ind.macd_signal().iloc[-1]
-        
+        close = df["close"].iloc[-1]
+        macd = macd_ind.macd().iloc[-1] / close if close > 0 else 0.0
+        macd_signal = macd_ind.macd_signal().iloc[-1] / close if close > 0 else 0.0
+
         rsi_ind = RSIIndicator(df["close"], window=14)
         rsi = rsi_ind.rsi().iloc[-1] / 100.0
 
         bb_ind = BollingerBands(df["close"], window=20)
-        close = df["close"].iloc[-1]
         bb_upper_pct = (bb_ind.bollinger_hband().iloc[-1] - close) / close
         bb_lower_pct = (bb_ind.bollinger_lband().iloc[-1] - close) / close
         bb_width = bb_ind.bollinger_wband().iloc[-1]
@@ -40,21 +40,30 @@ class DailyContextFeatureEngine:
         # Daily performance
         prev_close = df["close"].iloc[-2]
         daily_return = (close - prev_close) / prev_close
-        
-        # Log volume trend
+
+        # Volume ratio (relative)
         avg_vol = df["volume"].iloc[-20:].mean()
         vol_ratio = df["volume"].iloc[-1] / avg_vol if avg_vol > 0 else 1.0
 
         context = np.array([
-            macd, macd_signal, rsi, bb_upper_pct, bb_lower_pct, bb_width, 
+            macd, macd_signal, rsi, bb_upper_pct, bb_lower_pct, bb_width,
             daily_return, np.log1p(vol_ratio)
         ], dtype=np.float32)
-        
+
         return np.nan_to_num(context)
 
 
+# Intraday indicator windows (scaled for minute bars)
+_MACD_FAST = 26
+_MACD_SLOW = 60
+_MACD_SIGNAL = 18
+_RSI_WINDOW = 60
+_BB_WINDOW = 60
+_VOL_WINDOW = 60
+
+
 class FeatureEngine:
-    WARMUP_PERIOD = 26
+    WARMUP_PERIOD = _MACD_SLOW
     OBS_DIM = 18 + DailyContextFeatureEngine.CONTEXT_DIM
 
     def __init__(self):
@@ -80,20 +89,23 @@ class FeatureEngine:
         df["norm_high"] = df["high"] / prev_close - 1
         df["norm_low"] = df["low"] / prev_close - 1
         df["norm_close"] = df["close"] / prev_close - 1
-        df["log_volume"] = np.log1p(df["volume"])
 
-        # MACD (12, 26, 9)
-        macd_ind = MACD(df["close"], window_slow=26, window_fast=12, window_sign=9)
-        df["macd"] = macd_ind.macd()
-        df["macd_signal"] = macd_ind.macd_signal()
-        df["macd_hist"] = macd_ind.macd_diff()
+        # Relative volume (ratio to rolling mean, scale-invariant)
+        vol_ma = df["volume"].rolling(window=_VOL_WINDOW, min_periods=1).mean()
+        df["rel_volume"] = df["volume"] / vol_ma.clip(lower=1.0)
 
-        # RSI (14), scaled to [0, 1]
-        rsi_ind = RSIIndicator(df["close"], window=14)
+        # MACD (minute-scale windows), normalized by price
+        macd_ind = MACD(df["close"], window_slow=_MACD_SLOW, window_fast=_MACD_FAST, window_sign=_MACD_SIGNAL)
+        df["macd"] = macd_ind.macd() / df["close"]
+        df["macd_signal"] = macd_ind.macd_signal() / df["close"]
+        df["macd_hist"] = macd_ind.macd_diff() / df["close"]
+
+        # RSI (minute-scale), scaled to [0, 1]
+        rsi_ind = RSIIndicator(df["close"], window=_RSI_WINDOW)
         df["rsi"] = rsi_ind.rsi() / 100.0
 
-        # Bollinger Bands (20)
-        bb_ind = BollingerBands(df["close"], window=20)
+        # Bollinger Bands (minute-scale)
+        bb_ind = BollingerBands(df["close"], window=_BB_WINDOW)
         df["bb_upper_pct"] = (bb_ind.bollinger_hband() - df["close"]) / df["close"]
         df["bb_lower_pct"] = (bb_ind.bollinger_lband() - df["close"]) / df["close"]
         df["bb_width"] = bb_ind.bollinger_wband()
@@ -154,7 +166,7 @@ class FeatureEngine:
                 row["norm_high"],
                 row["norm_low"],
                 row["norm_close"],
-                row["log_volume"],
+                row["rel_volume"],
                 row["macd"],
                 row["macd_signal"],
                 row["macd_hist"],

@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pytest
 
+from trading_model.env.features import FeatureEngine
 from trading_model.env.trading_env import TradingEnv
 
 
@@ -74,7 +75,7 @@ class TestTradingEnvStep:
             _, _, terminated, _, _ = env.step(0)
             steps += 1
         # Should run for num_bars - warmup_period steps
-        assert steps == 400 - 26
+        assert steps == 400 - FeatureEngine.WARMUP_PERIOD
 
     def test_force_liquidation_at_episode_end(self, env):
         env.reset(seed=42)
