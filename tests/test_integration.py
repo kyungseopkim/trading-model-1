@@ -67,3 +67,26 @@ class TestIntegrationFullEpisode:
 
         # With a 10% uptrend and minimal fees, portfolio should grow
         assert info["portfolio_value"] > 100_000.0
+
+
+class TestRollingContextIntegration:
+    def test_full_episode_with_rolling_context(self, synthetic_ohlcv, synthetic_daily_window):
+        """Full episode with rolling context should complete without errors."""
+        env = TradingEnv()
+        obs, _ = env.reset(
+            seed=42,
+            options={"intraday_data": synthetic_ohlcv, "daily_window": synthetic_daily_window},
+        )
+
+        steps = 0
+        terminated = False
+        while not terminated:
+            action = env.action_space.sample()
+            obs, reward, terminated, truncated, info = env.step(action)
+            steps += 1
+            assert not truncated
+            assert not np.any(np.isnan(obs[:22])), f"NaN in obs at step {steps}"
+
+        expected_steps = 400 - FeatureEngine.WARMUP_PERIOD
+        assert steps == expected_steps
+        assert info["portfolio_value"] > 0
