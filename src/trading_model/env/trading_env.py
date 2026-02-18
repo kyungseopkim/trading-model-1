@@ -59,6 +59,11 @@ class TradingEnv(gym.Env):
         daily_window = options.get("daily_window")
 
         self.feature_engine.precompute(self._intraday_data, daily_window=daily_window)
+        if self.feature_engine.num_steps <= FeatureEngine.WARMUP_PERIOD:
+            self._step = 0
+            self._too_short = True
+            return np.zeros(FeatureEngine.OBS_DIM, dtype=np.float32), {}
+        self._too_short = False
         self._step = FeatureEngine.WARMUP_PERIOD
         self._cash = self.initial_cash
         self._shares = 0.0
@@ -70,6 +75,10 @@ class TradingEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action: int):
+        if self._too_short:
+            obs = np.zeros(FeatureEngine.OBS_DIM, dtype=np.float32)
+            return obs, 0.0, True, False, {"portfolio_value": self._cash}
+
         price = self.feature_engine.get_close_price(self._step)
 
         # Map action to trade

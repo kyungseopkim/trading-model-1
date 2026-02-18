@@ -9,6 +9,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from sb3_contrib import RecurrentPPO
 
 from trading_model import TradingEnv
+from trading_model.env.features import FeatureEngine
 from trading_model.data.loader import load_daily_window, get_trading_days, load_specific_day, load_from_db, load_days_from_dataframe
 
 
@@ -48,7 +49,7 @@ def prepare_data(ticker, num_days, data_type="historical"):
         print("Falling back to synthetic data.")
         df = generate_synthetic_data(num_days=num_days)
 
-    min_bars = 1 if data_type == "daily" else 30
+    min_bars = 1 if data_type == "daily" else FeatureEngine.WARMUP_PERIOD + 2
     days = load_days_from_dataframe(df, min_bars=min_bars)
     print(f"Total trading days: {len(days)}")
     split_idx = int(len(days) * 0.8)
