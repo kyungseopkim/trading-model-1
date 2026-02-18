@@ -7,14 +7,15 @@ This project provides a modular single-stock intraday trading environment for Re
 ## Key Features
 
 - **Gymnasium API**: Fully compatible with the standard Reinforcement Learning interface.
-- **26-Dim Observation Space**: Combines 14 intraday market features, 8 daily context features (90-day window), and 4 agent state features.
+- **26-Dim Observation Space**: Combines 14 intraday market features, 8 **rolling** daily context features (recomputed per-step), and 4 agent state features.
+- **Rolling Daily Context**: Daily indicators (MACD, RSI, BBands, etc.) are recomputed at every intraday step by synthesizing a virtual daily bar from the day's progress, providing a more realistic and reactive view of the market.
 - **Walkthrough Training**: Sequential "Train on Day T, Eval on Day T+1" strategy for temporal robustness.
 - **Modular Design**: Swappable components for `FrictionModel`, `ActionMapper`, `FeatureEngine`, and `RewardCalculator`.
 - **Flexible Action Space**: Discrete actions with position sizing (Buy/Sell/Hold at 25%, 50%, and 100% levels).
 - **Risk-Aware Rewards**: Sharpe-hybrid reward function with a penalty for increases in drawdown.
 - **Database Driven**: Ingestion from MariaDB using **SQLAlchemy** (supports `_historical` and `_daily` tables).
 - **Hyperparameter Tuning**: Integrated **Optuna** support for automated optimization.
-- **CLI Utilities**: Click-powered interface for training, walkthroughs, tuning, and data export.
+- **CLI Utilities**: Click-powered interface for training, walkthroughs, and tuning; standalone data export utility.
 
 ## Project Structure
 
@@ -63,6 +64,12 @@ python main.py walkthrough --ticker NVDA --start_date 2024-03-01 --end_date 2024
 Run an Optuna study to find best parameters:
 ```bash
 python main.py tune-cmd --ticker NVDA --n_trials 20
+```
+
+### Evaluation
+Evaluate a trained model on a specific date range:
+```bash
+python main.py evaluate-cmd --ticker NVDA --start_date 2024-04-01 --end_date 2024-04-30
 ```
 
 ### Monitoring

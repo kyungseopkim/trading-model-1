@@ -11,7 +11,7 @@ A high-fidelity intraday trading environment built using the **Gymnasium** API.
 ## 2. Advanced Observation Space (26 Dimensions)
 The model observes a comprehensive state vector combining short-term and long-term signals:
 - **Intraday Market (14-D)**: Normalized price levels (OHLC), Log volume, MACD (3), RSI, Bollinger Bands (3), and Sin/Cos time embeddings.
-- **Daily Context (8-D)**: Derived from the trailing 90 days of daily data. Includes MACD, RSI, BBands, Daily Return, and Volume Ratio.
+- **Rolling Daily Context (8-D)**: Recomputed at every intraday step by synthesizing a virtual daily bar from the day's bars seen so far and appending it to the trailing 90 days. This includes MACD, RSI, BBands, Daily Return, and Volume Ratio.
 - **Agent State (4-D)**: Current position (binary), Unrealized PnL %, Cash-to-Value ratio, and Trade duration.
 
 ## 3. Action & Reward Logic
@@ -31,11 +31,12 @@ The model observes a comprehensive state vector combining short-term and long-te
 ## 5. Data & Infrastructure
 - **SQLAlchemy Ingestion**: Robust data pipeline fetching from MariaDB `stockdb`. Supports `_historical` (intraday) and `_daily` (interday) table schemas.
 - **Graceful Termination**: `KeyboardInterrupt` handler ensures that both the model weights (`.zip`) and normalization statistics (`.pkl`) are saved if training is manually stopped (Ctrl+C).
-- **CLI Utility**: Click-powered interface with subcommands:
-    - `walkthrough`: Execute the iterative train/eval strategy.
-    - `train-cmd`: Run standard training.
-    - `tune-cmd`: Launch an Optuna optimization study.
-    - `export`: Export database tables to local CSV files.
+- **CLI Utilities**:
+    - **Trading Model CLI** (`main.py`):
+        - `walkthrough`: Execute the iterative train/eval strategy.
+        - `tune-cmd`: Launch an Optuna optimization study.
+        - `evaluate-cmd`: Evaluate a trained model on a specific date range.
+    - **Data Export** (`export_stockdb.py`): Standalone utility to export database tables to local CSV files.
 
 ## 6. Development & Verification
 - **Testing**: Comprehensive test suite using `pytest` covering units (actions, rewards, features) and integrations (episode lifecycle).
