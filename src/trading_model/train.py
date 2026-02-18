@@ -1,9 +1,7 @@
-import os
 import click
 import pandas as pd
 import numpy as np
 import optuna
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from sb3_contrib import RecurrentPPO
@@ -70,47 +68,6 @@ def patch_env(vec_env, options):
     def patched_reset(seed=None, options_internal=None):
         return env._original_reset(seed=seed, options=options)
     env.reset = patched_reset
-
-
-def train(
-    ticker="NVDA",
-    data_type="historical",
-    num_days=20,
-    total_timesteps=100000,
-    initial_cash=100000.0,
-    fee_rate=0.001,
-    learning_rate=2e-4,
-    n_steps=2048,
-    batch_size=128,
-    ent_coef=0.01,
-    gamma=0.99,
-):
-    train_days, eval_days = prepare_data(ticker, num_days, data_type=data_type)
-    train_env = make_vec_envs(initial_cash, fee_rate)
-    
-    # For standard training, we just cycle through days
-    # We need a custom reset logic for the env to pick a random day from train_days
-    env = train_env.envs[0].unwrapped
-    original_reset = env.reset
-    def standard_reset(seed=None, options=None):
-        day_df = train_days[np.random.randint(len(train_days))]
-        return original_reset(seed=seed, options={"intraday_data": day_df})
-    env.reset = standard_reset
-
-    model = RecurrentPPO(
-        "MlpLstmPolicy", train_env, learning_rate=learning_rate, n_steps=n_steps,
-        batch_size=batch_size, ent_coef=ent_coef, gamma=gamma, verbose=1,
-        tensorboard_log="./tensorboard_logs/"
-    )
-
-    print("Starting training... (Press Ctrl+C to stop and save)")
-    try:
-        model.learn(total_timesteps=total_timesteps)
-    except KeyboardInterrupt:
-        print("\nInterrupted. Saving...")
-    finally:
-        model.save("trading_ppo_final")
-        train_env.save("vec_normalize.pkl")
 
 
 def walkthrough_train(
@@ -209,15 +166,6 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1):
 
 @click.group()
 def cli(): pass
-
-@cli.command()
-@click.option("--ticker", type=str, default="NVDA")
-@click.option("--data-type", type=click.Choice(["historical", "daily"]), default="historical")
-@click.option("--num-days", type=int, default=20)
-@click.option("--total-timesteps", type=int, default=100000)
-def train_cmd(**kwargs):
-    os.makedirs("./models/checkpoints", exist_ok=True)
-    train(**kwargs)
 
 @cli.command()
 @click.option("--ticker", type=str, default="NVDA")
