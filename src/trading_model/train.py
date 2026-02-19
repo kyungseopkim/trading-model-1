@@ -231,6 +231,7 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_fil
             patch_env(train_env, {"intraday_data": eval_day})
             result = _run_eval_episode(model, train_env, 100000.0)
 
+            tqdm.write(f"  Trial {trial.number} [{i+1}/{n_checkpoints}] eval PnL: {result['pnl_pct']:+.4f}%")
             trial.report(result["pnl_pct"], i)
 
             # Restore training mode and re-patch for random training days
