@@ -60,6 +60,15 @@ _MACD_SIGNAL = 18
 _RSI_WINDOW = 60
 _BB_WINDOW = 60
 _VOL_WINDOW = 60
+_CONTEXT_UPDATE_INTERVAL = 10
+
+
+_MARKET_FEATURE_COLS = [
+    "norm_open", "norm_high", "norm_low", "norm_close", "rel_volume",
+    "macd", "macd_signal", "macd_hist", "rsi",
+    "bb_upper_pct", "bb_lower_pct", "bb_width",
+    "time_sin", "time_cos",
+]
 
 
 class FeatureEngine:
@@ -67,10 +76,14 @@ class FeatureEngine:
     OBS_DIM = 18 + DailyContextFeatureEngine.CONTEXT_DIM
 
     def __init__(self):
-        self._features: pd.DataFrame | None = None
+        self._market_features: np.ndarray | None = None  # (n, 14) float32
+        self._close_prices: np.ndarray | None = None     # (n,) float64
+        self._raw_ohlcv: np.ndarray | None = None        # (n, 5) float64
+        self._n_steps: int = 0
         self._context: np.ndarray | None = None
         self._daily_window: pd.DataFrame | None = None
         self._context_engine = DailyContextFeatureEngine()
+        self._last_context_step: int = -_CONTEXT_UPDATE_INTERVAL
 
     def precompute(self, ohlcv: pd.DataFrame, daily_window: pd.DataFrame | None = None) -> None:
         """Precompute all technical indicators for a day's OHLCV data.
@@ -118,8 +131,14 @@ class FeatureEngine:
         # Fill NaN from warmup with 0
         df = df.fillna(0.0)
 
-        self._features = df
+        # Convert to numpy arrays for fast per-step access
+        self._close_prices = df["close"].to_numpy(dtype=np.float64)
+        self._raw_ohlcv = df[["open", "high", "low", "close", "volume"]].to_numpy(dtype=np.float64)
+        self._market_features = df[_MARKET_FEATURE_COLS].to_numpy(dtype=np.float32)
+        self._n_steps = n
+
         self._daily_window = daily_window
+        self._last_context_step = -_CONTEXT_UPDATE_INTERVAL
         if daily_window is not None:
             self._context = self._context_engine.compute_context(daily_window)
         else:
@@ -127,20 +146,23 @@ class FeatureEngine:
 
     def _build_synthetic_bar(self, step: int) -> dict:
         """Build a synthetic daily bar from intraday bars [0..step]."""
-        bars = self._features.iloc[: step + 1]
+        raw = self._raw_ohlcv
         return {
-            "open": bars.iloc[0]["open"],
-            "high": bars["high"].max(),
-            "low": bars["low"].min(),
-            "close": bars.iloc[step]["close"],
-            "volume": bars["volume"].sum(),
+            "open": raw[0, 0],
+            "high": raw[:step + 1, 1].max(),
+            "low": raw[:step + 1, 2].min(),
+            "close": raw[step, 3],
+            "volume": raw[:step + 1, 4].sum(),
         }
 
     def update_context(self, step: int) -> None:
         """Recompute daily context by appending a synthetic bar for today's intraday data."""
         if self._daily_window is None:
             return
+        if step - self._last_context_step < _CONTEXT_UPDATE_INTERVAL:
+            return
 
+        self._last_context_step = step
         synthetic = self._build_synthetic_bar(step)
         appended = pd.concat(
             [self._daily_window, pd.DataFrame([synthetic])],
@@ -150,35 +172,16 @@ class FeatureEngine:
 
     @property
     def num_steps(self) -> int:
-        if self._features is None:
+        if self._market_features is None:
             raise RuntimeError("Call precompute() first")
-        return len(self._features)
+        return self._n_steps
 
     def get_close_price(self, step: int) -> float:
-        return float(self._features.iloc[step]["close"])
+        return float(self._close_prices[step])
 
     def get_market_features(self, step: int) -> np.ndarray:
         """Return the 14 market features at the given step."""
-        row = self._features.iloc[step]
-        return np.array(
-            [
-                row["norm_open"],
-                row["norm_high"],
-                row["norm_low"],
-                row["norm_close"],
-                row["rel_volume"],
-                row["macd"],
-                row["macd_signal"],
-                row["macd_hist"],
-                row["rsi"],
-                row["bb_upper_pct"],
-                row["bb_lower_pct"],
-                row["bb_width"],
-                row["time_sin"],
-                row["time_cos"],
-            ],
-            dtype=np.float32,
-        )
+        return self._market_features[step].copy()
 
     def build_observation(
         self,

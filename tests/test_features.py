@@ -120,7 +120,7 @@ class TestRollingDailyContext:
         fe.precompute(synthetic_ohlcv, daily_window=synthetic_daily_window)
 
         step = 100
-        bars = fe._features.iloc[: step + 1]
+        bars = synthetic_ohlcv.iloc[: step + 1]
         expected_open = bars.iloc[0]["open"]
         expected_high = bars["high"].max()
         expected_low = bars["low"].min()

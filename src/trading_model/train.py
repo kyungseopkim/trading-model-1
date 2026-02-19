@@ -1,6 +1,7 @@
 import json
 import os
 import click
+import enlighten
 import pandas as pd
 import numpy as np
 import optuna
@@ -87,16 +88,17 @@ def _run_eval_episode(model, vec_env, initial_cash):
     Returns dict with portfolio_value, pnl_pct, and num_trades.
     """
     obs = vec_env.reset()
-    terminated = False
     num_trades = 0
     prev_action = 0
-    while not np.all(terminated):
+    while True:
         action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, info = vec_env.step(action)
+        obs, reward, done, info = vec_env.step(action)
         act = int(action[0])
         if act != 0 and act != prev_action:
             num_trades += 1
         prev_action = act
+        if done[0]:
+            break
     # info from VecEnv is a list of dicts; take first env
     final_info = info[0] if isinstance(info, list) else info
     portfolio_value = final_info.get("portfolio_value", initial_cash)
@@ -129,40 +131,49 @@ def walkthrough_train(
         tensorboard_log="./tensorboard_logs/"
     )
 
+    n_pairs = len(trading_days) - 1
+    manager = enlighten.get_manager()
+    pbar = manager.counter(total=n_pairs, desc='Walkthrough', unit='days')
     win_days, loss_days = 0, 0
-    for i in range(len(trading_days) - 1):
-        train_day, eval_day = trading_days[i], trading_days[i+1]
-        print(f"[{i+1}/{len(trading_days)-1}] Training: {train_day.date()}, Eval: {eval_day.date()}")
+    try:
+        for i in range(n_pairs):
+            train_day, eval_day = trading_days[i], trading_days[i+1]
 
-        daily_window = load_daily_window(ticker, train_day)
-        intraday_train = load_specific_day(ticker, train_day)
+            daily_window = load_daily_window(ticker, train_day)
+            intraday_train = load_specific_day(ticker, train_day)
 
-        if intraday_train.empty: continue
+            if intraday_train.empty:
+                pbar.update()
+                continue
 
-        patch_env(train_env, {"intraday_data": intraday_train, "daily_window": daily_window})
-        model.learn(total_timesteps=total_timesteps_per_day, reset_num_timesteps=False)
+            patch_env(train_env, {"intraday_data": intraday_train, "daily_window": daily_window})
+            model.learn(total_timesteps=total_timesteps_per_day, reset_num_timesteps=False)
 
-        intraday_eval = load_specific_day(ticker, eval_day)
-        if not intraday_eval.empty:
-            daily_window_eval = load_daily_window(ticker, eval_day)
-            patch_env(train_env, {"intraday_data": intraday_eval, "daily_window": daily_window_eval})
+            intraday_eval = load_specific_day(ticker, eval_day)
+            if not intraday_eval.empty:
+                daily_window_eval = load_daily_window(ticker, eval_day)
+                patch_env(train_env, {"intraday_data": intraday_eval, "daily_window": daily_window_eval})
 
-            # Disable VecNormalize training/reward normalization during eval
-            train_env.training = False
-            train_env.norm_reward = False
+                train_env.training = False
+                train_env.norm_reward = False
 
-            result = _run_eval_episode(model, train_env, initial_cash)
+                result = _run_eval_episode(model, train_env, initial_cash)
 
-            # Restore training mode
-            train_env.training = True
-            train_env.norm_reward = True
+                train_env.training = True
+                train_env.norm_reward = True
 
-            pnl = result["pnl_pct"]
-            if pnl >= 0:
-                win_days += 1
-            else:
-                loss_days += 1
-            print(f"  Eval PnL: {pnl:+.4f}%  |  Trades: {result['num_trades']}  |  Portfolio: ${result['portfolio_value']:,.2f}")
+                pnl = result["pnl_pct"]
+                if pnl >= 0:
+                    win_days += 1
+                else:
+                    loss_days += 1
+                print(f"  {train_day.date()} -> {eval_day.date()}  PnL: {pnl:+.4f}%  Trades: {result['num_trades']}  Portfolio: ${result['portfolio_value']:,.2f}")
+
+            pbar.desc = f'Walkthrough [W:{win_days} L:{loss_days}]'
+            pbar.update()
+    finally:
+        pbar.close()
+        manager.stop()
 
     print(f"\nWalkthrough Summary: {win_days} win / {loss_days} loss days")
     os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
@@ -170,11 +181,21 @@ def walkthrough_train(
     train_env.save(vec_normalize_path)
 
 
+def _patch_tune_training(vec_env, train_days):
+    """Patch envs to select a random training day on each reset."""
+    for env_wrapper in vec_env.envs:
+        env = env_wrapper.unwrapped
+        def tune_reset(seed=None, options=None, _orig=env._original_reset, _days=train_days):
+            return _orig(seed=seed, options={"intraday_data": _days[np.random.randint(len(_days))]})
+        env.reset = tune_reset
+
+
 def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_file="tuned_params.json"):
     if os.path.exists(params_file):
         print(f"Skipping tune: {params_file} already exists.")
         return
     train_days, eval_days = prepare_data(ticker, 20)
+
     def objective(trial):
         lr = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
         ns = trial.suggest_categorical("n_steps", [512, 1024, 2048])
@@ -187,12 +208,11 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_fil
         max_grad_norm = trial.suggest_categorical("max_grad_norm", [0.3, 0.5, 1.0])
 
         train_env = make_vec_envs(100000.0, 0.001)
+        # Save original resets before any patching so patch_env works correctly for eval
         for env_wrapper in train_env.envs:
             env = env_wrapper.unwrapped
-            original_reset = env.reset
-            def tune_reset(seed=None, options=None, _orig=original_reset):
-                return _orig(seed=seed, options={"intraday_data": train_days[np.random.randint(len(train_days))]})
-            env.reset = tune_reset
+            env._original_reset = env.reset
+        _patch_tune_training(train_env, train_days)
 
         model = RecurrentPPO(
             "MlpLstmPolicy", train_env,
@@ -201,12 +221,36 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_fil
             n_epochs=n_epochs, clip_range=clip_range, max_grad_norm=max_grad_norm,
             verbose=0,
         )
-        model.learn(total_timesteps=total_timesteps)
 
-        # Disable normalization for eval
+        # Train in chunks with intermediate evaluation for early pruning
+        n_checkpoints = 4
+        chunk_size = total_timesteps // n_checkpoints
+        for i in range(n_checkpoints):
+            model.learn(
+                total_timesteps=chunk_size * (i + 1),
+                reset_num_timesteps=(i == 0),
+            )
+
+            # Quick eval on one random day
+            train_env.training = False
+            train_env.norm_reward = False
+            eval_day = eval_days[np.random.randint(len(eval_days))]
+            patch_env(train_env, {"intraday_data": eval_day})
+            result = _run_eval_episode(model, train_env, 100000.0)
+
+            trial.report(result["pnl_pct"], i)
+
+            # Restore training mode and re-patch for random training days
+            train_env.training = True
+            train_env.norm_reward = True
+            _patch_tune_training(train_env, train_days)
+
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+        # Final evaluation
         train_env.training = False
         train_env.norm_reward = False
-
         eval_pnls = []
         for _ in range(min(3, len(eval_days))):
             eval_day = eval_days[np.random.randint(len(eval_days))]
@@ -215,14 +259,42 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_fil
             eval_pnls.append(result["pnl_pct"])
         return np.mean(eval_pnls)
 
-    study = optuna.create_study(direction="maximize")
-    print("Starting optimization... (Press Ctrl+C to stop)")
+    study = optuna.create_study(
+        direction="maximize",
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=1),
+    )
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    manager = enlighten.get_manager()
+    status = manager.status_bar(
+        status_format='Best: {best}  Completed: {done}  Pruned: {pruned}',
+        best='N/A', done=0, pruned=0,
+    )
+    pbar = manager.counter(total=n_trials, desc='Tuning', unit='trials')
+
+    def on_trial_end(study, trial):
+        n_done = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE)
+        n_pruned = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.PRUNED)
+        try:
+            best = f'{study.best_value:+.4f}%'
+        except ValueError:
+            best = 'N/A'
+        status.update(best=best, done=n_done, pruned=n_pruned)
+        pbar.update()
+
     try:
-        study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
+        study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, callbacks=[on_trial_end])
     except KeyboardInterrupt:
         print("\nOptimization interrupted by user.")
+    finally:
+        pbar.close()
+        status.close()
+        manager.stop()
 
-    if len(study.trials) > 0:
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    pruned = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+    print(f"Trials: {len(completed)} completed, {len(pruned)} pruned.")
+    if completed:
         print(f"Best params: {study.best_params}")
         print(f"Best value: {study.best_value}")
         with open(params_file, "w") as f:
@@ -253,16 +325,24 @@ def evaluate(
 
     model = RecurrentPPO.load(model_path, env=train_env)
 
+    manager = enlighten.get_manager()
+    pbar = manager.counter(total=len(trading_days), desc='Evaluating', unit='days')
     results = []
-    for day in trading_days:
-        intraday = load_specific_day(ticker, day)
-        if intraday.empty:
-            continue
-        daily_window = load_daily_window(ticker, day)
-        patch_env(train_env, {"intraday_data": intraday, "daily_window": daily_window})
-        result = _run_eval_episode(model, train_env, initial_cash)
-        results.append({"date": day.date(), **result})
-        print(f"  {day.date()}: PnL={result['pnl_pct']:+.4f}%  Trades={result['num_trades']}  Portfolio=${result['portfolio_value']:,.2f}")
+    try:
+        for day in trading_days:
+            intraday = load_specific_day(ticker, day)
+            if intraday.empty:
+                pbar.update()
+                continue
+            daily_window = load_daily_window(ticker, day)
+            patch_env(train_env, {"intraday_data": intraday, "daily_window": daily_window})
+            result = _run_eval_episode(model, train_env, initial_cash)
+            results.append({"date": day.date(), **result})
+            print(f"  {day.date()}: PnL={result['pnl_pct']:+.4f}%  Trades={result['num_trades']}  Portfolio=${result['portfolio_value']:,.2f}")
+            pbar.update()
+    finally:
+        pbar.close()
+        manager.stop()
 
     if results:
         pnls = [r["pnl_pct"] for r in results]

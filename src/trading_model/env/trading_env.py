@@ -39,6 +39,7 @@ class TradingEnv(gym.Env):
 
         # Episode state
         self._intraday_data: pd.DataFrame | None = None
+        self._too_short = False
         self._step = 0
         self._cash = initial_cash
         self._shares = 0.0
