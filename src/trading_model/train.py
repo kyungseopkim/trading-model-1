@@ -88,11 +88,15 @@ def _run_eval_episode(model, vec_env, initial_cash):
     Returns dict with portfolio_value, pnl_pct, and num_trades.
     """
     obs = vec_env.reset()
+    # RecurrentPPO needs LSTM state carried across steps
+    lstm_state = None
+    episode_start = np.ones((vec_env.num_envs,), dtype=bool)
     num_trades = 0
     prev_action = 0
     while True:
-        action, _ = model.predict(obs, deterministic=True)
+        action, lstm_state = model.predict(obs, state=lstm_state, episode_start=episode_start, deterministic=True)
         obs, reward, done, info = vec_env.step(action)
+        episode_start = done
         act = int(action[0])
         if act != 0 and act != prev_action:
             num_trades += 1
@@ -183,7 +187,7 @@ def _patch_tune_training(vec_env, train_days):
         env.reset = tune_reset
 
 
-def tune(ticker="NVDA", n_trials=20, total_timesteps=50000, n_jobs=1, params_file="tuned_params.json"):
+def tune(ticker="NVDA", n_trials=20, total_timesteps=200000, n_jobs=1, params_file="tuned_params.json"):
     if os.path.exists(params_file):
         print(f"Skipping tune: {params_file} already exists.")
         return
