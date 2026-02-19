@@ -22,10 +22,12 @@ class TradingEnv(gym.Env):
         initial_cash: float = 100_000.0,
         fee_rate: float = 0.001,
         reward_eta: float = 0.01,
+        inaction_penalty: float = 0.001,
     ):
         super().__init__()
 
         self.initial_cash = initial_cash
+        self.inaction_penalty = inaction_penalty
 
         self.feature_engine = FeatureEngine()
         self.action_mapper = ActionMapper()
@@ -129,6 +131,10 @@ class TradingEnv(gym.Env):
         portfolio_value = self._cash + self._shares * price
         step_return = (portfolio_value - prev_value) / prev_value if prev_value > 0 else 0.0
         reward = self.reward_calc.calculate(portfolio_value, step_return)
+
+        # Penalize sitting in cash with no position to encourage exploration
+        if shares_delta == 0 and self._shares == 0:
+            reward -= self.inaction_penalty
 
         info = {"portfolio_value": portfolio_value}
         obs = np.zeros(FeatureEngine.OBS_DIM, dtype=np.float32) if terminated else self._get_obs()

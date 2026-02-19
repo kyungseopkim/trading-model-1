@@ -93,11 +93,13 @@ def _run_eval_episode(model, vec_env, initial_cash):
     episode_start = np.ones((vec_env.num_envs,), dtype=bool)
     num_trades = 0
     prev_action = 0
+    action_counts = np.zeros(7, dtype=int)
     while True:
         action, lstm_state = model.predict(obs, state=lstm_state, episode_start=episode_start, deterministic=True)
         obs, reward, done, info = vec_env.step(action)
         episode_start = done
         act = int(action[0])
+        action_counts[act] += 1
         if act != 0 and act != prev_action:
             num_trades += 1
         prev_action = act
@@ -107,7 +109,7 @@ def _run_eval_episode(model, vec_env, initial_cash):
     final_info = info[0] if isinstance(info, list) else info
     portfolio_value = final_info.get("portfolio_value", initial_cash)
     pnl_pct = (portfolio_value - initial_cash) / initial_cash * 100
-    return {"portfolio_value": portfolio_value, "pnl_pct": pnl_pct, "num_trades": num_trades}
+    return {"portfolio_value": portfolio_value, "pnl_pct": pnl_pct, "num_trades": num_trades, "action_counts": action_counts}
 
 
 def walkthrough_train(
@@ -187,7 +189,7 @@ def _patch_tune_training(vec_env, train_days):
         env.reset = tune_reset
 
 
-def tune(ticker="NVDA", n_trials=20, total_timesteps=200000, n_jobs=1, params_file="tuned_params.json"):
+def tune(ticker="NVDA", n_trials=20, total_timesteps=500000, n_jobs=1, params_file="tuned_params.json"):
     if os.path.exists(params_file):
         print(f"Skipping tune: {params_file} already exists.")
         return
@@ -235,7 +237,13 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=200000, n_jobs=1, params_fi
             patch_env(train_env, {"intraday_data": eval_day})
             result = _run_eval_episode(model, train_env, 100000.0)
 
-            tqdm.write(f"  Trial {trial.number} [{i+1}/{n_checkpoints}] eval PnL: {result['pnl_pct']:+.4f}%")
+            ac = result["action_counts"]
+            total_steps = ac.sum()
+            hold_pct = ac[0] / total_steps * 100 if total_steps > 0 else 0
+            tqdm.write(
+                f"  Trial {trial.number} [{i+1}/{n_checkpoints}] eval PnL: {result['pnl_pct']:+.4f}%"
+                f"  trades: {result['num_trades']}  hold: {hold_pct:.0f}%  acts: {ac.tolist()}"
+            )
             trial.report(result["pnl_pct"], i)
 
             # Restore training mode and re-patch for random training days
