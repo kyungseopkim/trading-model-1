@@ -10,6 +10,10 @@ n_jobs            := "1"
 timesteps_per_day := "50000"
 models_dir        := "models"
 
+# ── Install/sync dependencies ────────────────────────────────
+sync:
+    uv sync
+
 # ── Full pipeline: tune → train all → evaluate all ───────────
 pipeline: tune train-all eval-all
 
