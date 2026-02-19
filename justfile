@@ -1,8 +1,8 @@
 # ── Configuration ─────────────────────────────────────────────
 tickers           := "AAPL MSFT NVDA TSLA GOOGL"
-train_start       := "2023-01-01"
-train_end         := "2025-09-30"
-eval_start        := "2025-10-01"
+train_start       := "2021-01-01"
+train_end         := "2026-02-01"
+eval_start        := "2025-01-01"
 eval_end          := "2026-02-01"
 params_file       := "tuned_params.json"
 n_trials          := "20"
