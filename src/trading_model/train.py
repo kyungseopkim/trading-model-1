@@ -131,11 +131,25 @@ def walkthrough_train(
         return
 
     train_env = make_vec_envs(initial_cash, fee_rate)
-    model = RecurrentPPO(
-        "MlpLstmPolicy", train_env, learning_rate=constant_schedule(learning_rate),
-        n_steps=n_steps, batch_size=batch_size, verbose=0,
-        tensorboard_log="./tensorboard_logs/"
-    )
+
+    # Resume from existing model if available
+    model_zip = model_path + ".zip" if not model_path.endswith(".zip") else model_path
+    if os.path.exists(model_zip) and os.path.exists(vec_normalize_path):
+        print(f"Resuming from existing model: {model_zip}")
+        train_env = VecNormalize.load(vec_normalize_path, train_env.venv)
+        train_env.training = True
+        train_env.norm_reward = True
+        model = RecurrentPPO.load(model_zip, env=train_env)
+        model.learning_rate = constant_schedule(learning_rate)
+        model.n_steps = n_steps
+        model.batch_size = batch_size
+    else:
+        print("Starting fresh model")
+        model = RecurrentPPO(
+            "MlpLstmPolicy", train_env, learning_rate=constant_schedule(learning_rate),
+            n_steps=n_steps, batch_size=batch_size, verbose=0,
+            tensorboard_log="./tensorboard_logs/"
+        )
 
     n_pairs = len(trading_days) - 1
     win_days, loss_days = 0, 0
