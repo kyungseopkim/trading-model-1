@@ -1,5 +1,7 @@
 import json
 import os
+import signal
+import threading
 import click
 from tqdm import tqdm
 import pandas as pd
@@ -12,6 +14,29 @@ from sb3_contrib import RecurrentPPO
 from trading_model import TradingEnv
 from trading_model.env.features import FeatureEngine
 from trading_model.data.loader import load_daily_window, get_trading_days, load_specific_day, load_from_db, load_days_from_dataframe
+
+_saving_model = threading.Event()
+_interrupt_requested = threading.Event()
+
+
+def _interrupt_handler(signum, frame):
+    """Handle Ctrl+C gracefully: if saving, defer; otherwise flag for clean exit."""
+    if _saving_model.is_set():
+        print("\nInterrupt received — saving in progress, will exit after save completes.")
+    else:
+        print("\nInterrupt received — will exit after current step.")
+    _interrupt_requested.set()
+
+
+def _save_model(model, model_path, train_env, vec_normalize_path):
+    """Save model and normalizer with interrupt protection."""
+    _saving_model.set()
+    try:
+        os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
+        model.save(model_path)
+        train_env.save(vec_normalize_path)
+    finally:
+        _saving_model.clear()
 
 
 def constant_schedule(value: float):
@@ -154,44 +179,55 @@ def walkthrough_train(
     n_pairs = len(trading_days) - 1
     win_days, loss_days = 0, 0
     pbar = tqdm(range(n_pairs), desc='Walkthrough', unit='days')
-    for i in pbar:
-        train_day, eval_day = trading_days[i], trading_days[i+1]
 
-        daily_window = load_daily_window(ticker, train_day)
-        intraday_train = load_specific_day(ticker, train_day)
+    _interrupt_requested.clear()
+    prev_handler = signal.signal(signal.SIGINT, _interrupt_handler)
 
-        if intraday_train.empty:
-            continue
+    try:
+        for i in pbar:
+            if _interrupt_requested.is_set():
+                print("\nStopping early due to interrupt.")
+                break
 
-        patch_env(train_env, {"intraday_data": intraday_train, "daily_window": daily_window})
-        model.learn(total_timesteps=total_timesteps_per_day, reset_num_timesteps=False)
+            train_day, eval_day = trading_days[i], trading_days[i+1]
 
-        intraday_eval = load_specific_day(ticker, eval_day)
-        if not intraday_eval.empty:
-            daily_window_eval = load_daily_window(ticker, eval_day)
-            patch_env(train_env, {"intraday_data": intraday_eval, "daily_window": daily_window_eval})
+            daily_window = load_daily_window(ticker, train_day)
+            intraday_train = load_specific_day(ticker, train_day)
 
-            train_env.training = False
-            train_env.norm_reward = False
+            if intraday_train.empty:
+                continue
 
-            result = _run_eval_episode(model, train_env, initial_cash)
+            patch_env(train_env, {"intraday_data": intraday_train, "daily_window": daily_window})
+            model.learn(total_timesteps=total_timesteps_per_day, reset_num_timesteps=False)
 
-            train_env.training = True
-            train_env.norm_reward = True
+            intraday_eval = load_specific_day(ticker, eval_day)
+            if not intraday_eval.empty:
+                daily_window_eval = load_daily_window(ticker, eval_day)
+                patch_env(train_env, {"intraday_data": intraday_eval, "daily_window": daily_window_eval})
 
-            pnl = result["pnl_pct"]
-            if pnl >= 0:
-                win_days += 1
-            else:
-                loss_days += 1
-            tqdm.write(f"  {train_day.date()} -> {eval_day.date()}  PnL: {pnl:+.4f}%  Trades: {result['num_trades']}  Portfolio: ${result['portfolio_value']:,.2f}")
+                train_env.training = False
+                train_env.norm_reward = False
 
-        pbar.set_description(f'Walkthrough [W:{win_days} L:{loss_days}]')
+                result = _run_eval_episode(model, train_env, initial_cash)
 
-    print(f"\nWalkthrough Summary: {win_days} win / {loss_days} loss days")
-    os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
-    model.save(model_path)
-    train_env.save(vec_normalize_path)
+                train_env.training = True
+                train_env.norm_reward = True
+
+                pnl = result["pnl_pct"]
+                if pnl >= 0:
+                    win_days += 1
+                else:
+                    loss_days += 1
+                tqdm.write(f"  {train_day.date()} -> {eval_day.date()}  PnL: {pnl:+.4f}%  Trades: {result['num_trades']}  Portfolio: ${result['portfolio_value']:,.2f}")
+
+            pbar.set_description(f'Walkthrough [W:{win_days} L:{loss_days}]')
+
+        print(f"\nWalkthrough Summary: {win_days} win / {loss_days} loss days")
+        print("Saving model...")
+        _save_model(model, model_path, train_env, vec_normalize_path)
+        print("Model saved.")
+    finally:
+        signal.signal(signal.SIGINT, prev_handler)
 
 
 def _patch_tune_training(vec_env, train_days):
@@ -310,9 +346,13 @@ def tune(ticker="NVDA", n_trials=20, total_timesteps=500000, n_jobs=1, params_fi
     if completed:
         print(f"Best params: {study.best_params}")
         print(f"Best value: {study.best_value}")
-        with open(params_file, "w") as f:
-            json.dump(study.best_params, f, indent=2)
-        print(f"Saved best params to {params_file}")
+        _saving_model.set()
+        try:
+            with open(params_file, "w") as f:
+                json.dump(study.best_params, f, indent=2)
+            print(f"Saved best params to {params_file}")
+        finally:
+            _saving_model.clear()
     else:
         print("No trials completed.")
 

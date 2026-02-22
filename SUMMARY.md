@@ -1,7 +1,5 @@
 # Project Feature Summary: Trading Model RL
 
-This document summarizes the current features and architectural state of the `trading-model` project.
-
 ## 1. Core Environment (`TradingEnv`)
 A high-fidelity intraday trading environment built using the **Gymnasium** API.
 - **Composition-based Architecture**: Modularized logic for features, actions, rewards, and frictions.
